@@ -1,19 +1,70 @@
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use notify::{Watcher, RecursiveMode};
 use std::path::Path;
 use std::fs;
-use anyhow::anyhow;
 use std::ffi::OsStr;
+use std::process::Command;
 
 pub const KPM_DIR: &str = "/data/adb/kpm";
 pub const KPMMGR_PATH: &str = "/data/adb/ksu/bin/kpmmgr";
 
-// 确保 KPM 目录存在，如果不存在则创建
-pub fn ensure_kpm_dir() -> Result<()> {
-    if !Path::new(KPM_DIR).exists() {
-        fs::create_dir_all(KPM_DIR)?;
+// 获取KPM版本
+pub fn get_kpm_version() -> Result<String> {
+    let output = Command::new(KPMMGR_PATH)
+        .arg("version")
+        .output()
+        .map_err(|e| anyhow!("Failed to execute kpmmgr: {}", e))?;
+    
+    if output.status.success() {
+        let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        Ok(version)
+    } else {
+        let error = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        Err(anyhow!("Error getting KPM version: {}", error))
     }
-    Ok(())
+}
+
+// 检查KPM是否已配置
+pub fn check_kpm_configured() -> bool {
+    Path::new(KPMMGR_PATH).exists() && is_executable(KPMMGR_PATH)
+}
+
+// 检查文件是否可执行
+fn is_executable(path: &str) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(metadata) = fs::metadata(path) {
+            return metadata.permissions().mode() & 0o111 != 0;
+        }
+    }
+    false
+}
+
+// 创建确保 KPM 目录存在
+pub fn ensure_kpm_dir() -> Result<()> {
+    // 检查KPM版本和配置状态
+    let kpm_version_result = get_kpm_version();
+    let is_kpm_configured = check_kpm_configured();
+    
+    match kpm_version_result {
+        Ok(version) if !version.to_lowercase().starts_with("error") => {
+            log::info!("KPM version {} detected, proceeding with directory creation", version);
+            if !Path::new(KPM_DIR).exists() {
+                fs::create_dir_all(KPM_DIR)?;
+                log::info!("Created KPM directory: {}", KPM_DIR);
+            }
+            Ok(())
+        },
+        Ok(version) => {
+            log::warn!("KPM version check returned an error: {}", version);
+            Err(anyhow!("KPM not properly configured: {}", version))
+        },
+        Err(e) => {
+            log::error!("KPM version check failed: {}", e);
+            Err(anyhow!("KPM not properly configured: {}", e))
+        }
+    }
 }
 
 pub fn start_kpm_watcher() -> Result<()> {
